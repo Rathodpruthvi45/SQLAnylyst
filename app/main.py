@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from app.db.get_all_tables import execute_sql
 from app.langgraph.langgraph_nodes import compile_graph
 from app.langgraph.SqlAnalyst_State import SqlAnalystState
 app=FastAPI()
@@ -12,3 +13,7 @@ def test_api():
     response=graph.invoke(state)
     return response
 
+@app.get("/query")
+def run_query():
+    row=execute_sql("select count(*) from users")
+    return row

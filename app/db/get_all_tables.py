@@ -54,3 +54,15 @@ def get_all_tables_schema():
     
     
     return results
+
+def execute_sql(sql_query:str):
+    try:
+        conn = sqlite3.connect(DB_PATH)  
+        cursor = conn.cursor()
+
+        cursor.execute(sql_query)
+        rows = cursor.fetchall()
+    except Exception as e:
+        return e
+    conn.close()
+    return rows

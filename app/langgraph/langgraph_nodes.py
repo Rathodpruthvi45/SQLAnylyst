@@ -4,10 +4,13 @@ from app.langgraph.SqlAnalyst_State import SqlAnalystState
 from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 import json
-from app.db.get_all_tables import get_all_tables_schema
-os.environ["GOOGLE_API_KEY"] ="AIzaSyDG4deiAwG4_SLJGNKX9CWm08YIrm1Jaiw"
+from app.db.get_all_tables import get_all_tables_schema,execute_sql
+from app.core.config import settings
+from dotenv import load_dotenv
+load_dotenv()
 
-model=ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+FORBIDDEN = ["DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "TRUNCATE"]
+model=ChatGoogleGenerativeAI(model="gemini-2.5-flash",google_api_key=settings.GOOGLE_API_KEY)
 
 
 def validate_question(state:SqlAnalystState):
@@ -171,33 +174,166 @@ def create_question(state:SqlAnalystState):
 
     Return only SQL.
     """
-    response = model.invoke(prompt)
-    print(response.content)
-    sql_query=response.content
+    sql_query=""
+    try:
+
+        response = model.invoke(prompt)
+
+        sql_query=response.content
+    except Exception as e:
+        print(e)
     return {"sql_query":sql_query}
 
+def check_query_is_correct_as_per_quations(state:SqlAnalystState):
+    table_name=state['table_name']
+    schema=state['schema']
+    question=state['question']
+    sql_query=state['sql_query']
 
+    if not sql_query:
+        return {
+            "is_sql_valid": False,
+            "error": "SQL query missing"
+        }
+
+    if not sql_query.strip().upper().startswith("SELECT"):
+        return {
+            "is_sql_valid": False,
+            "error": "Only SELECT queries are allowed"
+        }
+
+    if any(word in sql_query.upper() for word in FORBIDDEN):
+        return {
+            "is_sql_valid": False,
+            "error": "Dangerous SQL detected"
+        }
+    prompt=f"""
+    You are a SQL security and correctness validator.
+
+    Your task is to verify whether the given SQL query is:
+    1. SAFE (read-only)
+    2. CORRECT for the user question
+    3. VALID according to the table schema
+
+    Rules:
+    - ONLY SELECT queries are allowed
+    - DO NOT allow:
+    DELETE, DROP, UPDATE, INSERT, ALTER, TRUNCATE
+    - Query must use table: {table_name}
+    - Query must ONLY use columns from this list:
+    {schema}
+    - Do NOT invent tables or columns
+    - SQL must logically answer the user question
+
+    Return ONLY valid JSON.
+    DO NOT explain.
+    DO NOT add markdown.
+    DO NOT add extra text.
+
+    JSON format:
+    {{
+    "is_sql_valid": true | false,
+    "reason": "short reason if invalid"
+    }}
+
+    User question:
+    {question}
+
+    SQL query:
+    {sql_query}
+    """
+    response = model.invoke(prompt)
+    raw = response.content.strip()
+    if raw.startswith("```"):
+        raw = raw.replace("```json", "").replace("```", "").strip()
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {
+            "is_sql_valid": False,
+            "error": "Invalid JSON from SQL verification model"
+        }
+    return {
+        "is_sql_valid": True
+    }
+
+def sql_verification_router(state: SqlAnalystState):
+    if state.get("is_sql_valid"):
+        return "execute_sql_node"
+    else:
+        return END
+
+def execute_sql_node(state: SqlAnalystState):
+
+    sql=state['sql_query']
+    results=execute_sql(sql)
+    return {
+        "query_result":results
+    }
+
+# def compile_graph():
+#     graph=StateGraph(SqlAnalystState)
+#     graph.add_node(validate_question,"validate_question")
+    
+#     graph.add_node(choose_tables,"choose_tables")
+#     graph.add_node(create_question,"create_question")
+#     graph.set_entry_point("validate_question")
+#     graph.add_conditional_edges("validate_question",safety_router, {
+#         "choose_tables": "choose_tables",
+#         END: END,
+#     })
+
+#     graph.add_edge("choose_tables","create_question")
+#     graph.add_edge("create_question",END)
+
+#     app = graph.compile()
+#     return app
+
+    
+
+    
 
 
 
 def compile_graph():
-    graph=StateGraph(SqlAnalystState)
-    graph.add_node(validate_question,"validate_question")
-    graph.add_node(choose_tables,"choose_tables")
-    graph.add_node(create_question,"create_question")
+    graph = StateGraph(SqlAnalystState)
+
+    # Nodes
+    graph.add_node("validate_question", validate_question)
+    graph.add_node("choose_tables", choose_tables)
+    graph.add_node("create_question", create_question)
+    graph.add_node("check_sql", check_query_is_correct_as_per_quations)
+    graph.add_node("execute_sql_node", execute_sql_node)
+
+    # Entry point
     graph.set_entry_point("validate_question")
-    graph.add_conditional_edges("validate_question",safety_router, {
-        "choose_tables": "choose_tables",
-        END: END,
-    })
 
-    graph.add_edge("choose_tables","create_question")
-    graph.add_edge("create_question",END)
+    # Question safety routing
+    graph.add_conditional_edges(
+        "validate_question",
+        safety_router,
+        {
+            "choose_tables": "choose_tables",
+            END: END,
+        }
+    )
 
-    app = graph.compile()
-    return app
+    # Main flow
+    graph.add_edge("choose_tables", "create_question")
+    graph.add_edge("create_question", "check_sql")
 
-    
+    # SQL safety routing
+    graph.add_conditional_edges(
+        "check_sql",
+        sql_verification_router,
+        {
+            "execute_sql_node": "execute_sql_node",
+            END: END,
+        }
+    )
 
-    
+    # End
+    graph.add_edge("execute_sql_node", END)
 
+    return graph.compile()

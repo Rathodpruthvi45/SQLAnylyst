@@ -5,9 +5,9 @@ from app.langgraph.SqlAnalyst_State import SqlAnalystState
 app=FastAPI()
 
 @app.get("/")
-def test_api():
+def test_api(quations:str):
     state = {
-        "question": "Show total users",
+        "question":quations,
     }
     graph=compile_graph()
     response=graph.invoke(state)

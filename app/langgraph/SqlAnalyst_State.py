@@ -12,4 +12,6 @@ class SqlAnalystState(TypedDict, total=False):
     messages: Annotated[List[str], add_messages]
     retry_count: int
     is_safe:bool
+    is_sql_valid:bool
+    query_result:list[dict]
 
